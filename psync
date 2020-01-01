@@ -4,7 +4,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 print_help() {
-	cat <<EOF
+  cat <<EOF
 psync - Quick directory sync tool that respects .gitignore.
 
         psync uses git and rsync to ensure that changes in the local directory
@@ -13,9 +13,16 @@ psync - Quick directory sync tool that respects .gitignore.
         files that are marked as dirty). Files ignored by git are also ignored
         by psync.
 
-        It is intended to be run frequently to ensure files are backed up 
+        The source should be your backup copy. The destination is your working
+        copy.
+
+        It is intended to be run frequently to ensure files are backed up
         between commits. I use a hook in my editor to sync every time I save a
         file.
+
+        It is also useful for projects where large resources (perhaps media or
+        node_modules) are kept in the repo directory but are not part of the
+        repo itself.
 
 USAGE: psync [-hv] [ VERB ] [ SOURCE ] [ DESTINATION ]
 
@@ -23,8 +30,21 @@ Where VERB is one of:
 
     clone [ SOURCE ] DESTINATION
 
-          Clone a (presumably remote) source repository into the (presumably
-          local) destination.
+          Clone in either direction. Supported scenarios:
+
+          1. Only destination is specified. Source is PWD
+
+          2. Source and destination ore directories. Clone source directly into
+             destination.
+
+          3. Source is a directory and destination is a directory with a
+             trailing "/". Create the destination directory under destination.
+
+          4. Source is a directory but destination doesn't exist. Create it.
+
+          5. Source doesn't exist but destination is a directory. Create source
+             and clone backwards (just the first time).
+
 
      sync [ SOURCE ] [ DESTINATION ]
 
@@ -54,49 +74,55 @@ EOF
 }
 
 log() {
-	[ "$verbose" = "true" ] && echo "$*" || return 0
+  [ "$verbose" = "true" ] && echo "$*" || return 0
 }
 
 error_exit() {
-  >&2 echo "$*"
+  echo >&2 "$*"
   exit 1
 }
 
 exe() {
   local line
-	# Display and execute the command
-	if [ "$verbose" = "true" ]; then
-		line="$(for a in "$@"; do printf "%s " "$a"; done)"
-		printf >&2 "\e[38;5;7m    %s\e[0m\n" "$line"
-	fi
-	"$@"
+  # Display and execute the command
+  if [ "$verbose" = "true" ]; then
+    line="$(for a in "$@"; do printf "%s " "$a"; done)"
+    printf >&2 "\e[38;5;7m    %s\e[0m\n" "$line"
+  fi
+  "$@"
 }
 
 source_if() {
-	[ -n "${1:-}" ] && [ -f "$1" ] && . "$1" || return 0
+  [ -n "${1:-}" ] && [ -f "$1" ] && . "$1" || return 0
 }
 
 upsearch() {
-	local file="$1"
-	local directory="${2:-$PWD}"
-	while [ -n "$directory" ]; do
-		[ -e "$directory/$file" ] && echo "$directory/$file" && return 0
-		directory=${directory%/*}
-	done
-	return 1
+  local file="$1"
+  local directory="${2:-$PWD}"
+  while [ -n "$directory" ]; do
+    [ -e "$directory/$file" ] && echo "$directory/$file" && return 0
+    directory=${directory%/*}
+  done
+  return 1
 }
 
 # Stolen from: https://stackoverflow.com/a/23002317
 expand_path() {
   if [ -d "$1" ]; then
     # dir
-    (cd "$1"; pwd)
+    (
+      cd "$1"
+      pwd
+    )
   elif [ -f "$1" ]; then
     # file
-    if [[ $1 = /* ]]; then
+    if [[ $1 == /* ]]; then
       echo "$1"
     elif [[ $1 == */* ]]; then
-      echo "$(cd "${1%/*}"; pwd)/${1##*/}"
+      echo "$(
+        cd "${1%/*}"
+        pwd
+      )/${1##*/}"
     else
       echo "$(pwd)/$1"
     fi
@@ -111,21 +137,21 @@ git_ignore_list() {
 
 # do_rsync SOURCE DESTINATION
 do_rsync() {
-	local source="$1"
-	local destination="$2"
+  local source="$1"
+  local destination="$2"
   [ -d "$source" ] || error_exit "Error: Can't find source directory ($source)."
   [ -d "$destination" ] || error_exit "Error: Can't find destination directory ($destination)."
 
-	log "Synchronizing: $source >>> $destination"
+  log "Synchronizing: $source >>> $destination"
 
-	exe rsync "${rsync_params[@]}" \
-      <(git_ignore_list "$source") \
-      "$source/" "$destination"
+  exe rsync "${rsync_params[@]}" \
+    <(git_ignore_list "$source") \
+    "$source/" "$destination"
 }
 
 # checkout [ SOURCE ] DESTINATION
 checkout() {
-  local source destination
+  local source destination rsync_source rsync_destination
   case $# in
   1)
     source="$PWD"
@@ -139,38 +165,49 @@ checkout() {
     error_exit "Error: psync checkout takes either 1 or 2 arguments"
     ;;
   esac
-	[ -d "$destination" ] && destination="$destination/$(basename "$source")"
-  mkdir -p "$destination"
+
+  if [ -d "$source" ]; then
+    [ -d "$destination" ] [ "${destination: -1}" = "/" ] &&
+      destination="$destination/$(basename "$source")"
+    mkdir -p "$destination"
+    rsync_source="$source"
+    rsync_destination="$destination"
+  elif [ ! -d "$source" ] && [ -d "$destination" ]; then
+    mkdir -p "$source"
+    rsync_source="$destination"
+    rsync_destination="$source"
+  fi
+
   source="$(expand_path "$source")"
   destination="$(expand_path "$destination")"
   log "source: $source"
   log "destination: $destination"
-	echo "Cloning..."
-	do_rsync "$source" "$destination"
-	printf "local='%s'\nremote='%s'\n" "$destination" "$source" \
-         >"$destination/psync_config"
+  do_rsync "$rsync_source" "$rsync_destination"
+  printf "local='%s'\nremote='%s'\n" "$destination" "$source" \
+    >"$destination/psync_config"
+
 }
 
 # sync [ SOURCE ] [ DESTINATION ]
 sync() {
   local source destination local remote
   source_if "$(upsearch psync_config)"
-	case $# in
-    0)
-      source="$local"
-      destination="$remote"
-      ;;
-    1)
-      source="$local" 
-      destination="$1"
-      ;;
-    2)
-      source="$1"
-      destination="$2"
-      ;;
-    *)
-      error_exit "Error: psync sync takes 0, 1, or 2 arguments"
-      ;;
+  case $# in
+  0)
+    source="$local"
+    destination="$remote"
+    ;;
+  1)
+    source="$local"
+    destination="$1"
+    ;;
+  2)
+    source="$1"
+    destination="$2"
+    ;;
+  *)
+    error_exit "Error: psync sync takes 0, 1, or 2 arguments"
+    ;;
   esac
   [ -d "$source" ] || error_exit "Error: source is not a directory ($source)"
   mkdir -p "$destination"
@@ -178,7 +215,7 @@ sync() {
   [ "$verbose" = "true" ] && git_ignore_list "$source"
   log
 
-	do_rsync "$source" "$destination"
+  do_rsync "$source" "$destination"
 }
 
 verbose="false"
@@ -188,22 +225,29 @@ rsync_params=(-ah --delete --include .git --exclude-from)
 
 while getopts "hv" opts; do
   case "$opts" in
-    v) verbose="true"
-       rsync_params=(--verbose "${rsync_params[@]}") ;;
-    h) print_help && exit ;;
-    *) echo "Invalid flag: -$opts"
-       exit 27 ;;
+  v)
+    verbose="true"
+    rsync_params=(--verbose "${rsync_params[@]}")
+    ;;
+  h) print_help && exit ;;
+  *)
+    echo "Invalid flag: -$opts"
+    exit 27
+    ;;
   esac
 done
 shift $((OPTIND - 1))
 
 case "${1:-}" in
-  checkout | clone | co | c)
-	  shift
-	  checkout "$@" ;;
-  sync | s)
-	  shift
-	  sync "$@" ;;
-  *)
-	  sync "$@" ;;
+checkout | clone | co | c)
+  shift
+  checkout "$@"
+  ;;
+sync | s)
+  shift
+  sync "$@"
+  ;;
+*)
+  sync "$@"
+  ;;
 esac
