@@ -4,6 +4,8 @@
 
 It is intended to be run frequently to ensure files are backed up between commits.
 
+## Usage
+
 ```
 USAGE: psync [-hv] [ VERB ] [ SOURCE ] [ DESTINATION ]
 
@@ -38,6 +40,8 @@ Options are:
 
 -v       Turn on verbose messages
 ```
+
+# Emacs Config (optional)
 
 I use a hook in my editor to sync every time I save a file. If you use Emacs, maybe it's of use to you.
 
